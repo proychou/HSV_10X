@@ -1,0 +1,768 @@
+---
+title: "HSV 10X data analysis in Seurat"
+author: "Pavitra Roychoudhury"
+date: "3/20/2019"
+output: html_document
+---
+
+#. Analysis using Seurat
+Based on this tutorial: https://satijalab.org/seurat/pbmc3k_tutorial.html
+
+```{r}
+rm(list=ls())
+library(Seurat)
+library(dplyr)
+
+tgscg.data<-Read10X(data.dir='~/Desktop/2018_09_HSV_10x_loupe/aggregated_outs_nocontrols/outs/filtered_gene_bc_matrices_mex/mm10/')
+tgscg.data
+
+libIDs<-read.csv('./results/aggregated_nocontrols/LibraryID.csv',stringsAsFactors=F)
+
+tgscg <- CreateSeuratObject(raw.data = tgscg.data, min.cells = 3, min.genes = 200, 
+    project = "10X_TGSCG");
+
+slotNames(tgscg);
+head(tgscg@meta.data);
+table(tgscg@meta.data$orig.ident)
+
+#add library ID (tissue)
+tgscg@meta.data$libID<-libIDs$LibraryID[match(row.names(tgscg@meta.data),libIDs$Barcode)]
+head(tgscg@meta.data)
+```
+
+
+## QC: mitochondrial genes
+```{r}
+mito.genes <- grep(pattern = "^MT-|^mt-", x = rownames(x = tgscg@data), value = TRUE)
+percent.mito <- Matrix::colSums(tgscg@raw.data[mito.genes, ])/Matrix::colSums(tgscg@raw.data)
+tgscg <- AddMetaData(object = tgscg, metadata = percent.mito, col.name = "percent.mito")
+
+pdf('./QC_plots.pdf',wigth=7,height=7)
+VlnPlot(object = tgscg, features.plot = c("nGene", "nUMI", "percent.mito"), nCol = 3)
+par(mfrow = c(1, 2))
+GenePlot(object = tgscg, gene1 = "nUMI", gene2 = "percent.mito")
+GenePlot(object = tgscg, gene1 = "nUMI", gene2 = "nGene")
+
+```
+
+## Filter
+Filter out cells that have unique gene counts over 8500 or less than 200 
+```{r}
+tgscg <- FilterCells(object = tgscg, subset.names = c("nGene", "percent.mito"), 
+    low.thresholds = c(200, -Inf), high.thresholds = c(8500, 0.2))
+
+par(mfrow = c(1, 2))
+GenePlot(object = tgscg, gene1 = "nUMI", gene2 = "percent.mito",ylim=c(0,.82))
+GenePlot(object = tgscg, gene1 = "nUMI", gene2 = "nGene",ylim=c(1800,9000))
+VlnPlot(object = tgscg, features.plot = c("nGene", "nUMI", "percent.mito"), nCol = 3);
+dev.off()
+```
+
+
+## Normalization
+Global-scaling normalization method “LogNormalize” that normalizes the gene expression measurements for each cell by the total expression, multiplies this by a scale factor (10,000 by default), and log-transforms the result.
+```{r}
+tgscg <- NormalizeData(object = tgscg, normalization.method = "LogNormalize", 
+    scale.factor = 10000);
+```
+
+
+## Detection of variable genes across the single cells
+```{r}
+tgscg <- FindVariableGenes(object = tgscg, mean.function = ExpMean, dispersion.function = LogVMR, 
+    x.low.cutoff = 0.0125, x.high.cutoff = Inf, y.cutoff = 0.5)
+length(x = tgscg@var.genes)
+```
+    
+## Scaling the data and removing unwanted sources of variation
+```{r}
+tgscg <- ScaleData(object = tgscg, vars.to.regress = c("nUMI", "percent.mito"))
+```
+
+
+##Perform linear dimensional reduction
+Perform PCA on the scaled data
+```{r}
+tgscg <- RunPCA(object = tgscg, pc.genes = tgscg@var.genes, pcs.compute = 40, do.print = TRUE, pcs.print = 1:5, 
+    genes.print = 5)
+tgscg <- ProjectPCA(object = tgscg, do.print = F)
+# PrintPCA(object = tgscg, pcs.print = 1:5, genes.print = 5, use.full = FALSE)
+# VizPCA(object = tgscg, pcs.use = 1:2)
+# VizPCA(object = tgscg, pcs.use = 3:4)
+# VizPCA(object = tgscg, pcs.use = 5:6)
+# PCAPlot(object = tgscg, dim.1 = 1, dim.2 = 2)
+# PCHeatmap(object = tgscg, pc.use = 1, cells.use = 500, do.balanced = TRUE, label.columns = FALSE)
+
+pdf('./HeatmapTop36PCs.pdf',width=15,height=12)
+PCHeatmap(object = tgscg, pc.use = 1:12, cells.use = 500, do.balanced = TRUE, 
+    label.columns = FALSE, use.full = FALSE)
+PCHeatmap(object = tgscg, pc.use = 13:24, cells.use = 500, do.balanced = TRUE, 
+    label.columns = FALSE, use.full = FALSE)
+PCHeatmap(object = tgscg, pc.use = 25:36, cells.use = 500, do.balanced = TRUE, 
+    label.columns = FALSE, use.full = FALSE)
+dev.off()
+```
+
+
+##Determine statistically significant principal components
+```{r}
+# tgscg <- JackStraw(object = tgscg, num.replicate = 100, display.progress = FALSE);
+# JackStrawPlot(object = tgscg, PCs = 1:20);
+
+pdf('./PCelbowplot.pdf',width=6,height=4)
+PCElbowPlot(object = tgscg,num.pc=40)
+dev.off()
+
+#pick 25 PCs to continue
+```
+
+##Cluster the cells
+```{r}
+tgscg <- FindClusters(object = tgscg, reduction.type = "pca", dims.use = 1:25, 
+    resolution = 0.6, print.output = 0, save.SNN = TRUE,n.iter=100,force.recalc=T);
+PrintFindClustersParams(object = tgscg)
+```
+
+##Run Non-linear dimensional reduction (tSNE)
+```{r}
+tgscg <- RunTSNE(object = tgscg, dims.use = 1:25, do.fast = TRUE)
+
+pdf('./TSNE_plot.pdf',width=8,height=5)
+TSNEPlot(object = tgscg, do.label=T)
+dev.off()
+
+saveRDS(tgscg, file = "~/Desktop/seurat_analysis_tgscg.rds")
+```
+
+
+##Finding differentially expressed genes (cluster biomarkers)
+```{r}
+all_markers<-FindAllMarkers(tgscg, only.pos=T, min.pct=.1,thresh.use=0.25);
+head(all_markers)
+write.csv(all_markers,'./AllMarkers.csv',row.names=F)
+
+#Top 5 markers for each cluster
+top5percluster_markers<-all_markers %>% group_by(cluster) %>% top_n(5, avg_logFC)
+top5percluster_markers
+write.csv(top5percluster_markers,'./Top5percluster.csv',row.names=F);
+
+#Top 10 markers for each cluster
+top10percluster_markers<-all_markers %>% group_by(cluster) %>% top_n(10, avg_logFC)
+top10percluster_markers
+write.csv(top10percluster_markers,'./Top10percluster.csv',row.names=F);
+
+saveRDS(tgscg, file = "~/Desktop/seurat_analysis_tgscg.rds")
+```
+
+Find markers but just within tg and scg clusters alone
+```{r}
+tgscg<-readRDS('~/Desktop/2018_09_HSV_10x_loupe/seurat_analysis_tgscg.rds')
+
+tgonly<-SubsetData(tgscg,cells.use=row.names(subset(tgscg@meta.data,libID=='TGmixed_AAV')))
+markers_tg<-FindAllMarkers(tgonly,only.pos=T, min.pct=.1);
+head(markers_tg)
+write.csv(markers_tg,'./Markers_TGonly.csv',row.names=F)
+
+scgonly<-SubsetData(tgscg,cells.use=row.names(subset(tgscg@meta.data,libID=='SCGmixed_AAV')))
+markers_scg<-FindAllMarkers(scgonly,only.pos=T, min.pct=.1);
+head(markers_scg)
+write.csv(markers_scg,'./Markers_SCGonly.csv',row.names=F)
+```
+
+##Rename clusters
+```{r}
+library(ggplot2);
+library(reshape2);
+library(cowplot);
+library(dplyr)
+
+#rename clusters 
+tgscg@meta.data$cluster_name<-'';
+tgscg@meta.data$cluster_name[tgscg@meta.data$res.0.6=='0']<-'S-02';
+tgscg@meta.data$cluster_name[tgscg@meta.data$res.0.6=='1']<-'S-01';
+tgscg@meta.data$cluster_name[tgscg@meta.data$res.0.6=='2']<-'T-03';
+tgscg@meta.data$cluster_name[tgscg@meta.data$res.0.6=='3']<-'T-04';
+tgscg@meta.data$cluster_name[tgscg@meta.data$res.0.6=='4']<-'T-01';
+tgscg@meta.data$cluster_name[tgscg@meta.data$res.0.6=='5']<-'T-02';
+tgscg@meta.data$cluster_name[tgscg@meta.data$res.0.6=='6']<-'S-03';
+tgscg@meta.data$cluster_name[tgscg@meta.data$res.0.6=='7']<-'S-04';
+tgscg@meta.data$cluster_name[tgscg@meta.data$res.0.6=='8']<-'T-05';
+tgscg@meta.data$cluster_name[tgscg@meta.data$res.0.6=='9']<-'T-08';
+tgscg@meta.data$cluster_name[tgscg@meta.data$res.0.6=='10']<-'T-06';
+tgscg@meta.data$cluster_name[tgscg@meta.data$res.0.6=='11']<-'S-05';
+tgscg@meta.data$cluster_name[tgscg@meta.data$res.0.6=='12']<-'T-09';
+tgscg@meta.data$cluster_name[tgscg@meta.data$res.0.6=='13']<-'T-10';
+tgscg@meta.data$cluster_name[tgscg@meta.data$res.0.6=='14']<-'T-07';
+tgscg@meta.data$cluster_name[tgscg@meta.data$res.0.6=='15']<-'Z-Lymph';
+
+head(tgscg@meta.data)
+
+#Write cluster data to file
+temp<-as.data.frame(tgscg@meta.data);
+temp$barcode<-row.names(temp);
+temp2<-as.data.frame(tgscg@dr$tsne@cell.embeddings);
+temp2$barcode<-row.names(temp2)
+all_cells<-merge(temp,temp2,by='barcode');
+
+write.csv(all_cells,'./seurat_tgscg_nocontrols/All_cells_clusters.csv',row.names=F);
+```
+
+
+## Looking for HSV and AAV
+We want to look at the cells identified in the analysis so far and ask whether they have any HSV or AAV. 
+```{r}
+library(Rsamtools);
+library(Biostrings);
+library(tidyverse);
+
+# tgscg<-readRDS('~/Desktop/2018_09_HSV_10x_loupe/seurat_analysis_tgscg.rds')
+tx_all<-c('HSV','AAV1','AAV8','AAV-PHP_S','AAV-Rh10');
+all_bams<-list.files('./results/','.bam$',full.names=T);
+samps<-c('TGmixed_AAV','SCGmixed_AAV');
+
+tgscg@meta.data[,c('HSV','AAV1','AAV8','AAV.PHP_S','AAV.Rh10')]<-NULL
+
+#Read in a gff file, look for LAT annotation and use that to filter by the pos slot in aln
+df<-tgscg@meta.data;
+df$cell_barcode<-row.names(df)
+df$barcode2<-unlist(lapply(df$cell_barcode,function(x)strsplit(x,'-')[[1]][1]));
+
+summ<-data.frame(samp=rep(samps,each=length(tx_all)+1),
+                 tx=rep(c('LAT',tx_all),length(samps)),
+                 filtered_reads=0,tx_mapped_reads=NA,tx_reads_inTSNE=NA,tx_UMIs_inTSNE=NA,cells_positive=NA);
+
+for(samp in samps){
+  
+  #Import reads
+  readsfname<-grep(samp,list.files('./results','_all1.fasta',full.names=T),value=T);
+  all_r1s<-readDNAStringSet(readsfname);
+  all_r1s
+  reads_names<-unlist(lapply(names(all_r1s),function(x)strsplit(x,'_')[[1]][1]));
+  summ$filtered_reads[summ$samp==samp]<-length(all_r1s);
+    
+  if(samp%in%c('NoAAV_TG','NoAAV_SCG')){
+    txs<-'HSV'
+  }else{
+    txs<-tx_all;
+  }  
+  for(tx in txs){
+    bamfname<-all_bams[grepl(samp,all_bams)&grepl(tx,all_bams)];
+    
+    #Import bam file
+    baifname<-indexBam(bamfname);
+    params<-ScanBamParam(flag=scanBamFlag(isUnmappedQuery=FALSE),
+                         what=c('qname','rname','strand','pos','qwidth','mapq','cigar','seq'));
+    aln<-scanBam(bamfname,baifname,param=params)
+    aln_names<-unlist(lapply(aln[[1]]$qname,function(x)strsplit(x,'_')[[1]][1]));
+    summ$tx_mapped_reads[summ$samp==samp&summ$tx==tx]<-length(aln[[1]]$seq);
+    
+    #Find corresponding R1 to the reads in the bam
+    matched_r1s<-all_r1s[match(aln_names,reads_names)];
+    matched_r1s
+    
+    #Extract barcodes
+    matched_reads_barcodes<-as.character(substr(matched_r1s,1,16));
+    matched_reads_umis<-as.character(substr(matched_r1s,17,26));
+    
+    #Now match them to the cells in seurat analysis
+    df[df$libID==samp,paste0(tx,'_reads')]<-unlist(lapply(df$barcode2[df$libID==samp],function(x)
+    	sum(matched_reads_barcodes==x)));
+    df[df$libID==samp,paste0(tx,'_UMIs')]<-unlist(lapply(df$barcode2[df$libID==samp],function(x)
+    	length(unique(matched_reads_umis[matched_reads_barcodes==x]))));
+    
+    if(tx=='HSV'){
+    	df[df$libID==samp,'LAT_reads']<-unlist(lapply(df$barcode2[df$libID==samp],function(x)
+    		sum(matched_reads_barcodes==x&aln[[1]]$pos%in%c(1:7569,118777:127151))));
+    	df[df$libID==samp,'LAT_UMIs']<-unlist(lapply(df$barcode2[df$libID==samp],function(x)
+    		length(unique(matched_reads_umis[matched_reads_barcodes==x&aln[[1]]$pos%in%c(1:7569,118777:127151)]))));
+    	summ$tx_mapped_reads[summ$samp==samp&summ$tx=='LAT']<-sum(aln[[1]]$pos%in%c(1:7569,118777:127151));
+    	summ$tx_reads_inTSNE[summ$samp==samp&summ$tx=='LAT']<-sum(df[df$libID==samp,'LAT_reads']);
+    	summ$tx_UMIs_inTSNE[summ$samp==samp&summ$tx=='LAT']<-sum(df[df$libID==samp,'LAT_UMIs']);
+    	summ$cells_positive[summ$samp==samp&summ$tx=='LAT']<-sum(df[df$libID==samp,'LAT_reads']>0);
+    }
+    summ$tx_reads_inTSNE[summ$samp==samp&summ$tx==tx]<-sum(df[df$libID==samp,paste0(tx,'_reads')]);
+    summ$tx_UMIs_inTSNE[summ$samp==samp&summ$tx==tx]<-sum(df[df$libID==samp,paste0(tx,'_UMIs')]);
+    summ$cells_positive[summ$samp==samp&summ$tx==tx]<-sum(df[df$libID==samp,paste0(tx,'_reads')]>0);
+  }
+  write.csv(summ,'./seurat_tgscg_nocontrols/HSV_AAVsummary.csv',row.names=F);
+  write.csv(df,'./seurat_tgscg_nocontrols/All_cells_clusters.csv',row.names=F);
+}
+tgscg@meta.data<-df;
+saveRDS(tgscg, file = "~/Desktop/2018_09_HSV_10x_loupe/seurat_analysis_tgscg.rds")
+
+```
+
+
+Visualization
+```{r}
+pdf('./seurat_tgscg_nocontrols/Top5percluster_heatmap.pdf',width=12,height=12)
+DoHeatmap(object = tgscg, genes.use = top5percluster_markers$gene, slim.col.label = TRUE, remove.key = TRUE)
+dev.off()
+
+pdf('./seurat_tgscg_nocontrols/Top10percluster_heatmap.pdf',width=13,height=16)
+DoHeatmap(object = tgscg, genes.use = top10percluster_markers$gene, slim.col.label = TRUE, remove.key = TRUE)
+dev.off()
+
+pdf('./seurat_tgscg_nocontrols/Top5percluster_heatmap_change order.pdf',width=12,height=12)
+temp<-top5percluster_markers%>%arrange(match(cluster,c(0,1,6,7,11,2,5,3,8,10,4,9,12:15)))
+# DoHeatmap(object = tgscg, genes.use = top5percluster_markers$gene, slim.col.label = TRUE, remove.key = TRUE,group.by='libID')
+DoHeatmap(object = tgscg, genes.use = temp$gene, slim.col.label = TRUE, remove.key = TRUE,group.by='res.0.6',
+					group.order=c(0,1,6,7,11,2,5,3,8,10,4,9,12:15))
+dev.off()
+
+pdf('./seurat_tgscg_nocontrols/Top10percluster_heatmap_newnames.pdf',width=16,height=16)
+DoHeatmap(object = tgscg, genes.use = top10percluster_markers$gene, slim.col.label = TRUE, remove.key = TRUE,group.by='cluster_name')
+dev.off()
+
+```
+
+
+1.	Top 500 differentially expressed genes HSV+ vs HSV minus in TG-1 & 8, SCG-3 & 4
+2.	Top 500 differentially expressed genes AAV1+ vs AAV1 minus in TG-1 & 7, SCG-3 & 4
+3.	Top 500 differentially expressed genes AAV8+ vs AAV8 minus in TG-2 & 8, SCG-3 & 4
+4.	Top 500 differentially expressed genes PHP.S+ vs PHP.S minus in TG-4 & 7, SCG-1 & 3
+5.	Top 500 differentially expressed genes Rh10+ vs Rh10 minus in TG-8 & 9, SCG-1 & 5
+6.	Top 500 differentially expressed genes HSV+ vs HSV minus in all TG & all SCG
+7.	Top 500 differentially expressed genes AAV1+ vs AAV1 minus in all TG & all SCG
+8.	Top 500 differentially expressed genes AAV8+ vs AAV8 minus in all TG & all SCG
+9.	Top 500 differentially expressed genes PHP.S+ vs PHP.S minus in all TG & all SCG
+10.	Top 500 differentially expressed genes Rh10+ vs Rh10 minus in all TG & all SCG
+11. Top 500 differentially expressed genes LAT+ vs LAT minus in all TG & all SCG
+
+Did this instead for all clusters
+```{r}
+library(reshape2);
+library(tidyverse);
+
+# tgscg<-readRDS('~/Desktop/2018_09_HSV_10x_loupe/seurat_analysis_tgscg.rds')
+
+min_cells<-5; #number of positive cells needed in order to do the comparison
+
+for(cluster in unique(tgscg@meta.data$cluster_name)){
+	
+	print(paste('Cluster',cluster,'...'))
+	
+	#select cells in that cluster
+	cell_ids<-row.names(subset(tgscg@meta.data,cluster_name==cluster));
+	print(paste(length(cell_ids),'cells'))
+	if(length(cell_ids)>0){
+		cell_subset<-SubsetData(tgscg,cells.use=cell_ids)
+	}
+	
+	#HSV
+	if(sum(cell_subset@meta.data$HSV_reads>0)>min_cells){
+		cell_subset@meta.data$cellident[cell_subset@meta.data$HSV_reads>0]<-'HSV+'
+		cell_subset@meta.data$cellident[cell_subset@meta.data$HSV_reads==0]<-'HSV-'
+		cell_subset<-SetAllIdent(cell_subset,id="cellident");
+		temp_markers<-FindMarkers(cell_subset,ident.1='HSV+',ident.2='HSV-',only.pos=T, min.pct=.01);
+		write.csv(temp_markers,paste0('./seurat_tgscg_nocontrols/diffexp_bycluster_HSV_AAV/HSV_',cluster,'.csv'),row.names=T);
+	}
+	
+	#HSV
+	if(sum(cell_subset@meta.data$LAT_reads>0)>min_cells){
+		cell_subset@meta.data$cellident[cell_subset@meta.data$LAT_reads>0]<-'LAT+'
+		cell_subset@meta.data$cellident[cell_subset@meta.data$LAT_reads==0]<-'LAT-'
+		cell_subset<-SetAllIdent(cell_subset,id="cellident");
+		temp_markers<-FindMarkers(cell_subset,ident.1='LAT+',ident.2='LAT-',only.pos=T, min.pct=.01);
+		write.csv(temp_markers,paste0('./seurat_tgscg_nocontrols/diffexp_bycluster_HSV_AAV/LAT_',cluster,'.csv'),row.names=T);
+	}
+	
+	#AAV1
+	if(sum(cell_subset@meta.data$AAV1_reads>0)>min_cells){
+		cell_subset@meta.data$cellident[cell_subset@meta.data$AAV1_reads>0]<-'AAV1+'
+		cell_subset@meta.data$cellident[cell_subset@meta.data$AAV1_reads==0]<-'AAV1-'
+		cell_subset<-SetAllIdent(cell_subset,id="cellident");
+		temp_markers<-FindMarkers(cell_subset,ident.1='AAV1+',ident.2='AAV1-',only.pos=T, min.pct=.01);
+		write.csv(temp_markers,paste0('./seurat_tgscg_nocontrols/diffexp_bycluster_HSV_AAV/AAV1_',cluster,'.csv'),row.names=T)
+	}
+	
+	#AAV8
+	if(sum(cell_subset@meta.data$AAV8_reads>0)>min_cells){
+		cell_subset@meta.data$cellident[cell_subset@meta.data$AAV8_reads>0]<-'AAV8+'
+		cell_subset@meta.data$cellident[cell_subset@meta.data$AAV8_reads==0]<-'AAV8-'
+		cell_subset<-SetAllIdent(cell_subset,id="cellident");
+		temp_markers<-FindMarkers(cell_subset,ident.1='AAV8+',ident.2='AAV8-',only.pos=T, min.pct=.01);
+		write.csv(temp_markers,paste0('./seurat_tgscg_nocontrols/diffexp_bycluster_HSV_AAV/AAV8_',cluster,'.csv'),row.names=T)
+	}
+	
+	#AAV.PHP_S
+	if(sum(cell_subset@meta.data$AAV.PHP_S_reads>0)>min_cells){
+		cell_subset@meta.data$cellident[cell_subset@meta.data$AAV.PHP_S_reads>0]<-'AAV.PHP_S+'
+		cell_subset@meta.data$cellident[cell_subset@meta.data$AAV.PHP_S_reads==0]<-'AAV.PHP_S-'
+		cell_subset<-SetAllIdent(cell_subset,id="cellident");
+		temp_markers<-FindMarkers(cell_subset,ident.1='AAV.PHP_S+',ident.2='AAV.PHP_S-',only.pos=T, min.pct=.01);
+		write.csv(temp_markers,paste0('./seurat_tgscg_nocontrols/diffexp_bycluster_HSV_AAV/AAV.PHP_S_',cluster,'.csv'),row.names=T)
+	}
+	
+	#AAV.Rh10
+	if(sum(cell_subset@meta.data$AAV.Rh10_reads>0)>min_cells){
+		cell_subset@meta.data$cellident[cell_subset@meta.data$AAV.Rh10_reads>0]<-'AAV.Rh10+'
+		cell_subset@meta.data$cellident[cell_subset@meta.data$AAV.Rh10_reads==0]<-'AAV.Rh10-'
+		cell_subset<-SetAllIdent(cell_subset,id="cellident");
+		temp_markers<-FindMarkers(cell_subset,ident.1='AAV.Rh10+',ident.2='AAV.Rh10-',only.pos=T, min.pct=.01);
+		write.csv(temp_markers,paste0('./seurat_tgscg_nocontrols/diffexp_bycluster_HSV_AAV/AAV.Rh10_',cluster,'.csv'),row.names=T)
+	}
+	
+}
+
+#For all cells
+#HSV
+if(sum(tgscg@meta.data$HSV_reads>0)>min_cells){
+	tgscg@meta.data$cellident[tgscg@meta.data$HSV_reads>0]<-'HSV+'
+	tgscg@meta.data$cellident[tgscg@meta.data$HSV_reads==0]<-'HSV-'
+	tgscg<-SetAllIdent(tgscg,id="cellident");
+	temp_markers<-FindMarkers(tgscg,ident.1='HSV+',ident.2='HSV-',only.pos=T, min.pct=.01);
+	write.csv(temp_markers,paste0('./seurat_tgscg_nocontrols/diffexp_bycluster_HSV_AAV/HSV_all.csv'),row.names=T);
+}
+
+#LAT
+if(sum(tgscg@meta.data$LAT_reads>0)>min_cells){
+	tgscg@meta.data$cellident[tgscg@meta.data$LAT_reads>0]<-'LAT+'
+	tgscg@meta.data$cellident[tgscg@meta.data$LAT_reads==0]<-'LAT-'
+	tgscg<-SetAllIdent(tgscg,id="cellident");
+	temp_markers<-FindMarkers(tgscg,ident.1='LAT+',ident.2='LAT-',only.pos=T, min.pct=.01);
+	write.csv(temp_markers,paste0('./seurat_tgscg_nocontrols/diffexp_bycluster_HSV_AAV/LAT_all.csv'),row.names=T);
+}
+
+#AAV1
+if(sum(tgscg@meta.data$AAV1_reads>0)>min_cells){
+	tgscg@meta.data$cellident[tgscg@meta.data$AAV1_reads>0]<-'AAV1+'
+	tgscg@meta.data$cellident[tgscg@meta.data$AAV1_reads==0]<-'AAV1-'
+	tgscg<-SetAllIdent(tgscg,id="cellident");
+	temp_markers<-FindMarkers(tgscg,ident.1='AAV1+',ident.2='AAV1-',only.pos=T, min.pct=.01);
+	write.csv(temp_markers,paste0('./seurat_tgscg_nocontrols/diffexp_bycluster_HSV_AAV/AAV1_all.csv'),row.names=T)
+}
+
+#AAV8
+if(sum(tgscg@meta.data$AAV8_reads>0)>min_cells){
+	tgscg@meta.data$cellident[tgscg@meta.data$AAV8_reads>0]<-'AAV8+'
+	tgscg@meta.data$cellident[tgscg@meta.data$AAV8_reads==0]<-'AAV8-'
+	tgscg<-SetAllIdent(tgscg,id="cellident");
+	temp_markers<-FindMarkers(tgscg,ident.1='AAV8+',ident.2='AAV8-',only.pos=T, min.pct=.01);
+	write.csv(temp_markers,paste0('./seurat_tgscg_nocontrols/diffexp_bycluster_HSV_AAV/AAV8_all.csv'),row.names=T)
+}
+
+#AAV.PHP_S
+if(sum(tgscg@meta.data$`AAV-PHP_S_reads`>0)>min_cells){
+	tgscg@meta.data$cellident[tgscg@meta.data$`AAV-PHP_S_reads`>0]<-'AAV.PHP_S+'
+	tgscg@meta.data$cellident[tgscg@meta.data$`AAV-PHP_S_reads`==0]<-'AAV.PHP_S-'
+	tgscg<-SetAllIdent(tgscg,id="cellident");
+	temp_markers<-FindMarkers(tgscg,ident.1='AAV.PHP_S+',ident.2='AAV.PHP_S-',only.pos=T, min.pct=.01);
+	write.csv(temp_markers,paste0('./seurat_tgscg_nocontrols/diffexp_bycluster_HSV_AAV/AAV.PHP_S_all.csv'),row.names=T)
+}
+
+#AAV.Rh10
+if(sum(tgscg@meta.data$`AAV-Rh10_reads`>0)>min_cells){
+	tgscg@meta.data$cellident[tgscg@meta.data$`AAV-Rh10_reads`>0]<-'AAV.Rh10+'
+	tgscg@meta.data$cellident[tgscg@meta.data$`AAV-Rh10_reads`==0]<-'AAV.Rh10-'
+	tgscg<-SetAllIdent(tgscg,id="cellident");
+	temp_markers<-FindMarkers(tgscg,ident.1='AAV.Rh10+',ident.2='AAV.Rh10-',only.pos=T, min.pct=.01);
+	write.csv(temp_markers,paste0('./seurat_tgscg_nocontrols/diffexp_bycluster_HSV_AAV/AAV.Rh10_all.csv'),row.names=T)
+}
+
+
+#TG/SCG only
+for(cluster in c('TGmixed_AAV','SCGmixed_AAV')){
+	
+	#select cells in that cluster
+	cell_ids<-row.names(subset(tgscg@meta.data,libID==cluster));
+	print(paste(length(cell_ids),'cells'))
+	if(length(cell_ids)>0){
+		cell_subset<-SubsetData(tgscg,cells.use=cell_ids)
+	}
+	#HSV
+	if(sum(cell_subset@meta.data$HSV_reads>0)>min_cells){
+		cell_subset@meta.data$cellident[cell_subset@meta.data$HSV_reads>0]<-'HSV+'
+		cell_subset@meta.data$cellident[cell_subset@meta.data$HSV_reads==0]<-'HSV-'
+		cell_subset<-SetAllIdent(cell_subset,id="cellident");
+		temp_markers<-FindMarkers(cell_subset,ident.1='HSV+',ident.2='HSV-',only.pos=T, min.pct=.01);
+		write.csv(temp_markers,paste0('./seurat_tgscg_nocontrols/diffexp_bycluster_HSV_AAV/HSV_',cluster,'.csv'),row.names=T);
+	}
+	
+	#LAT
+	if(sum(cell_subset@meta.data$LAT_reads>0)>min_cells){
+		cell_subset@meta.data$cellident[cell_subset@meta.data$LAT_reads>0]<-'LAT+'
+		cell_subset@meta.data$cellident[cell_subset@meta.data$LAT_reads==0]<-'LAT-'
+		cell_subset<-SetAllIdent(cell_subset,id="cellident");
+		temp_markers<-FindMarkers(cell_subset,ident.1='LAT+',ident.2='LAT-',only.pos=T, min.pct=.01);
+		write.csv(temp_markers,paste0('./seurat_tgscg_nocontrols/diffexp_bycluster_HSV_AAV/LAT_',cluster,'.csv'),row.names=T);
+	}
+	
+	#AAV1
+	if(sum(cell_subset@meta.data$AAV1_reads>0)>min_cells){
+		cell_subset@meta.data$cellident[cell_subset@meta.data$AAV1_reads>0]<-'AAV1+'
+		cell_subset@meta.data$cellident[cell_subset@meta.data$AAV1_reads==0]<-'AAV1-'
+		cell_subset<-SetAllIdent(cell_subset,id="cellident");
+		temp_markers<-FindMarkers(cell_subset,ident.1='AAV1+',ident.2='AAV1-',only.pos=T, min.pct=.01);
+		write.csv(temp_markers,paste0('./seurat_tgscg_nocontrols/diffexp_bycluster_HSV_AAV/AAV1_',cluster,'.csv'),row.names=T)
+	}
+	
+	#AAV8
+	if(sum(cell_subset@meta.data$AAV8_reads>0)>min_cells){
+		cell_subset@meta.data$cellident[cell_subset@meta.data$AAV8_reads>0]<-'AAV8+'
+		cell_subset@meta.data$cellident[cell_subset@meta.data$AAV8_reads==0]<-'AAV8-'
+		cell_subset<-SetAllIdent(cell_subset,id="cellident");
+		temp_markers<-FindMarkers(cell_subset,ident.1='AAV8+',ident.2='AAV8-',only.pos=T, min.pct=.01);
+		write.csv(temp_markers,paste0('./seurat_tgscg_nocontrols/diffexp_bycluster_HSV_AAV/AAV8_',cluster,'.csv'),row.names=T)
+	}
+	
+	#AAV.PHP_S
+	if(sum(cell_subset@meta.data$AAV.PHP_S_reads>0)>min_cells){
+		cell_subset@meta.data$cellident[cell_subset@meta.data$AAV.PHP_S_reads>0]<-'AAV.PHP_S+'
+		cell_subset@meta.data$cellident[cell_subset@meta.data$AAV.PHP_S_reads==0]<-'AAV.PHP_S-'
+		cell_subset<-SetAllIdent(cell_subset,id="cellident");
+		temp_markers<-FindMarkers(cell_subset,ident.1='AAV.PHP_S+',ident.2='AAV.PHP_S-',only.pos=T, min.pct=.01);
+		write.csv(temp_markers,paste0('./seurat_tgscg_nocontrols/diffexp_bycluster_HSV_AAV/AAV.PHP_S_',cluster,'.csv'),row.names=T)
+	}
+	
+	#AAV.Rh10
+	if(sum(cell_subset@meta.data$AAV.Rh10_reads>0)>min_cells){
+		cell_subset@meta.data$cellident[cell_subset@meta.data$AAV.Rh10_reads>0]<-'AAV.Rh10+'
+		cell_subset@meta.data$cellident[cell_subset@meta.data$AAV.Rh10_reads==0]<-'AAV.Rh10-'
+		cell_subset<-SetAllIdent(cell_subset,id="cellident");
+		temp_markers<-FindMarkers(cell_subset,ident.1='AAV.Rh10+',ident.2='AAV.Rh10-',only.pos=T, min.pct=.01);
+		write.csv(temp_markers,paste0('./seurat_tgscg_nocontrols/diffexp_bycluster_HSV_AAV/AAV.Rh10_',cluster,'.csv'),row.names=T)
+	}
+	
+}
+
+all_cells<-tgscg@meta.data
+head(all_cells)
+
+write.csv(all_cells%>%group_by(cluster_name)%>%
+	summarize(n_total=n(),
+						n_LATpos=sum(LAT_reads>0),
+						n_HSVpos=sum(HSV_reads>0),
+						n_AAV1pos=sum(AAV1_reads>0),
+						n_AAV8pos=sum(AAV8_reads>0),
+						n_AAVPHPSpos=sum(`AAV-PHP_S_reads`>0),
+						n_AAVRh10pos=sum(`AAV-Rh10_reads`>0)),
+	'./seurat_tgscg_nocontrols/Cluster_counts.csv',row.names=F)
+
+```
+
+```{r}
+library(reshape2)
+all_cells<-read.csv('./seurat_tgscg_nocontrols/All_cells_clusters.csv',stringsAsFactors=F)
+head(all_cells)
+
+df_melted<-melt(all_cells,
+								id.vars=c('barcode','tSNE_1','tSNE_2','res.0.6','libID','nGene','nUMI','percent.mito'),
+								variable.name='Transcript',
+								value.name='Reads',
+								measure.vars=c('HSV','AAV1','AAV8','AAV.PHP_S','AAV.Rh10'))
+head(df_melted)
+
+
+pdf('./seurat_tgscg_nocontrols/OverlayAAVHSV_tsne_binary.pdf',width=15,height=8)
+p1<-ggplot(all_cells,aes(x=tSNE_1,y=tSNE_2))+
+ 	geom_point(colour='grey',size=1)+
+  geom_point(data=subset(all_cells,HSV>0),size=1,colour='red')+
+  xlab('TSNE 1')+ylab('TSNE 2')+
+ 	theme_classic()+
+  ggtitle('HSV');
+p2<-ggplot(all_cells,aes(x=tSNE_1,y=tSNE_2))+
+ 	geom_point(colour='grey',size=1)+
+  geom_point(data=subset(all_cells,AAV1>0),size=1,colour='blue')+
+  xlab('TSNE 1')+ylab('TSNE 2')+
+ 	theme_classic()+
+  ggtitle('AAV1');
+p3<-ggplot(all_cells,aes(x=tSNE_1,y=tSNE_2))+
+ 	geom_point(colour='grey',size=1)+
+  geom_point(data=subset(all_cells,AAV8>0),size=1,colour='darkgreen')+
+  xlab('TSNE 1')+ylab('TSNE 2')+
+ 	theme_classic()+
+  ggtitle('AAV8');
+p4<-ggplot(all_cells,aes(x=tSNE_1,y=tSNE_2))+
+ 	geom_point(colour='grey',size=1)+
+  geom_point(data=subset(all_cells,AAV.PHP_S>0),size=1,colour='maroon')+
+  xlab('TSNE 1')+ylab('TSNE 2')+
+ 	theme_classic()+
+  ggtitle('AAV.PHP_S');
+p5<-ggplot(all_cells,aes(x=tSNE_1,y=tSNE_2))+
+ 	geom_point(colour='grey',size=1)+
+  geom_point(data=subset(all_cells,AAV.Rh10>0),size=1,colour='purple')+
+  xlab('TSNE 1')+ylab('TSNE 2')+
+ 	theme_classic()+
+  ggtitle('AAV.Rh10');
+p6<-ggplot(all_cells,aes(x=tSNE_1,y=tSNE_2))+
+ 	geom_point(aes(colour=as.factor(res.0.6)),size=1)+
+  xlab('TSNE 1')+ylab('TSNE 2')+
+ 	theme_classic()+
+	theme(legend.position='none')+
+  ggtitle('Clusters');
+plot_grid(p1,p2,p3,p4,p5,p6);
+dev.off()
+
+pdf('./seurat_tgscg_nocontrols/Expression_boxplots.pdf',width=5,height=4)
+ggplot(df_melted,aes(x=Transcript,y=Reads))+
+	geom_boxplot(aes(color=Transcript))+
+	theme(legend.position='none',
+				axis.text.x=element_text(angle=30,hjust=1));
+ggplot(subset(df_melted,Reads>0),
+			 aes(x=Transcript,y=Reads))+
+	geom_boxplot(aes(color=Transcript))+
+	scale_y_log10()+
+	theme(legend.position='none',
+				axis.text.x=element_text(angle=30,hjust=1));
+dev.off()
+	
+
+
+pdf('./seurat_tgscg_nocontrols/Summary_clusters_heatmaps.pdf',width=8,height=5)
+plot_data<-subset(df_melted,Reads>0);
+plot_data$cluster<-factor(plot_data$res.0.6,levels=c(0,1,6,7,11,2,5,3,8,10,4,9,12,13,14,15))
+# ggplot(plot_data,aes(x=cluster,y=Reads))+
+# 	geom_point(aes(colour=libID))+
+# 	geom_boxplot(aes(colour=libID))+
+# 	scale_y_log10()+
+# 	facet_wrap(~Transcript)
+
+library(RColorBrewer)
+yPalette <- colorRampPalette(rev(brewer.pal(11, "Spectral")), space="Lab")
+ggplot(plot_data,aes(y=Transcript,x=cluster,fill=log10(Reads)))+
+	geom_tile()+
+	scale_fill_gradientn(colours=yPalette(100))
+
+
+#Summarize
+summ_expr_clust<-group_by(df_melted,res.0.6,Transcript)%>%
+	summarise(zeros=sum(Reads==0),
+						nonzero=sum(Reads>0),
+						n_cells=length(unique(barcode)),
+						perc_pos=100*nonzero/n_cells)
+
+summ_expr_clust$cluster<-factor(summ_expr_clust$res.0.6,levels=c(0,1,6,7,11,2,5,3,8,10,4,9,12,13,14,15))
+ggplot(summ_expr_clust,aes(y=Transcript,x=cluster,fill=perc_pos))+
+	geom_tile()+
+	scale_fill_gradientn(colours=yPalette(100))
+
+ggplot(subset(summ_expr_clust,Transcript=='HSV'),
+			 aes(x=cluster,y=n_cells))+
+	geom_bar(stat='identity')
+
+dev.off()
+
+
+#Coinf
+summ_coinf<-group_by(all_cells,res.0.6)%>%
+	summarise(n_cells=length(unique(barcode)),
+						n_coinf=sum(HSV>0&(AAV1>0|AAV8>0|AAV.PHP_S>0|AAV.Rh10>0)),
+						perc_coinf=100*n_coinf/n_cells)
+summ_coinf$cluster<-factor(summ_coinf$res.0.6,levels=c(0,1,6,7,11,2,5,3,8,10,4,9,12,13,14,15))
+
+pdf('./seurat_tgscg_nocontrols/Coinf_percs.pdf',width=6,height=4)
+ggplot(summ_coinf,aes(x=cluster,y=n_coinf))+
+	geom_bar(stat='identity')+
+	ylab('# cells with HSV+AAV')
+ggplot(summ_coinf,aes(x=cluster,y=perc_coinf))+
+	geom_bar(stat='identity')+
+	ylab('% cells in cluster with HSV+AAV')
+dev.off()
+
+pdf('./seurat_tgscg_nocontrols/Coinf_scatterplot.pdf',width=8,height=5)
+ggplot(all_cells,aes(x=tSNE_1,y=tSNE_2))+
+ 	geom_point(aes(color=as.factor(res.0.6)),size=1)+
+  geom_point(data=subset(all_cells,HSV>0&(AAV1>0|AAV8>0|AAV.PHP_S>0|AAV.Rh10>0)),
+  					 size=1.5,colour='black',shape=8)+
+  xlab('TSNE 1')+ylab('TSNE 2')+
+  ggtitle('AAV+HSV coexpression')+
+	theme(legend.title=element_blank())+
+	guides(color = guide_legend(override.aes = list(size = 2)))
+dev.off()
+```
+
+
+##Compare our clusters to Nguyen ppr
+```{r}
+library(readxl);
+library(RColorBrewer)
+
+fname<-'./Nguyen_clusters_top100.xlsx';
+sheets<-excel_sheets(fname);
+ng_clusters<-do.call('rbind',lapply(sheets[sheets!='Legend'],function(x)read_excel(fname,sheet=x)))
+head(ng_clusters); tail(ng_clusters)
+clusters_ng<-unique(ng_clusters$cluster)
+
+our_clusters<-read.csv('./seurat_tgscg_nocontrols/AllMarkers.csv',stringsAsFactors=F);
+head(our_clusters);tail(our_clusters)
+clusters_us<-unique(our_clusters$cluster)
+
+#add a prefix
+# names(ng_clusters)<-paste0('ng_',names(ng_clusters));
+
+
+pdf('./seurat_tgscg_nocontrols/CompareNGclusters_heatmaps.pdf',width=8,height=5)
+
+hit_matrix<-as.data.frame(matrix(0,length(clusters_ng),length(clusters_us)))
+rownames(hit_matrix)<-clusters_ng
+colnames(hit_matrix)<-clusters_us
+head(hit_matrix)
+for(i in clusters_ng){
+	for(j in clusters_us){
+		hit_matrix[rownames(hit_matrix)==i,colnames(hit_matrix)==j]<-
+			sum(!is.na(match(ng_clusters$gene[ng_clusters$cluster==i],
+											 our_clusters$gene[our_clusters$cluster==j])));
+	}
+}
+head(hit_matrix)
+
+hit_matrix$ng_cluster<-rownames(hit_matrix)
+hit_matrix_melted<-melt(hit_matrix,id.vars='ng_cluster',variable.name='our_cluster',
+												value.name='matching_genes');
+hit_matrix_melted$matching_genes<-100*as.numeric(hit_matrix_melted$matching_genes)/100;
+hit_matrix_melted$our_cluster<-factor(hit_matrix_melted$our_cluster,
+																			levels=c(0,1,6,7,11,2,5,3,8,10,4,9,12,13,14,15))
+hit_matrix_melted$ng_cluster<-factor(hit_matrix_melted$ng_cluster,
+																		 levels=c(9,8,10,4,1,2,6,7,13,3,5,11,12))
+head(hit_matrix_melted)
+
+
+myPalette <- colorRampPalette(rev(brewer.pal(11, "RdGy")), space="Lab")
+ggplot(hit_matrix_melted,aes(x=our_cluster,y=ng_cluster,fill=matching_genes))+
+	geom_tile()+
+	scale_fill_gradientn(colours=myPalette(100))
+
+dev.off()
+
+#Our clusters vs our clusters
+pdf('./seurat_tgscg_nocontrols/Compareclusters_self_heatmaps.pdf',width=8,height=5)
+
+hit_matrix<-as.data.frame(matrix(0,length(clusters_us),length(clusters_us)))
+rownames(hit_matrix)<-clusters_us
+colnames(hit_matrix)<-clusters_us
+head(hit_matrix)
+for(i in clusters_us){
+	for(j in clusters_us){
+		hit_matrix[rownames(hit_matrix)==i,colnames(hit_matrix)==j]<-
+			sum(!is.na(match(our_clusters$gene[our_clusters$cluster==i],
+											 our_clusters$gene[our_clusters$cluster==j])));
+	}
+}
+head(hit_matrix)
+write.csv(hit_matrix,'./seurat_tgscg_nocontrols/CompareClusters_UsvsUs.csv')
+
+hit_matrix$our_cluster_x<-rownames(hit_matrix)
+hit_matrix_melted<-melt(hit_matrix,id.vars='our_cluster_x',variable.name='our_cluster_y',
+												value.name='matching_genes');
+hit_matrix_melted$matching_genes<-100*as.numeric(hit_matrix_melted$matching_genes)/100;
+hit_matrix_melted$our_cluster_y<-factor(hit_matrix_melted$our_cluster_y,
+                                        levels=c(0:15),
+                                        labels=c('SCG-2','SCG-1','TG-3','TG-4','TG-1','TG-2','SCG-3','SCG-4',
+                                                 'TG-5','TG-8','TG-6','SCG-5','TG-9','TG-10','TG-7','Lymphocytes'))
+hit_matrix_melted$our_cluster_x<-factor(hit_matrix_melted$our_cluster_x,
+                                        levels=c(0:15),
+                                        labels=c('SCG-2','SCG-1','TG-3','TG-4','TG-1','TG-2','SCG-3','SCG-4',
+                                                 'TG-5','TG-8','TG-6','SCG-5','TG-9','TG-10','TG-7','Lymphocytes'))
+head(hit_matrix_melted)
+write.csv(hit_matrix_melted,'./seurat_tgscg_nocontrols/CompareClusters_UsvsUs_long.csv')
+
+myPalette <- colorRampPalette(rev(brewer.pal(11, "RdGy")), space="Lab")
+ggplot(hit_matrix_melted,aes(x=our_cluster_x,y=our_cluster_y,fill=matching_genes))+
+	geom_tile()+
+	scale_fill_gradientn(colours=myPalette(100))
+
+dev.off()
+```
+
+
